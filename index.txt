@@ -2,3 +2,4 @@ sample This is the text file
 This is the text file
 add some changes
 This is the text
+Include the fix
