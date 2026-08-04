@@ -23,7 +23,7 @@ jobs:
               if [[ "$HEAD" =~ ^feature/.* ]] || \
                  [[ "$HEAD" =~ ^bugfix/.* ]] || \
                  [[ "$HEAD" =~ ^hotfix/.* ]] || \
-                 
+                 [[ "$HEAD" =~ ^fix/.* ]] || \
                  [[ "$HEAD" =~ ^release/.* ]]; then
                 exit 0
               fi
@@ -48,7 +48,7 @@ jobs:
                  [[ "$HEAD" =~ ^bugfix/.* ]] || \
                  [[ "$HEAD" =~ ^hotfix/.* ]] || \
                  [[ "$HEAD" =~ ^release/.* ]] || \
-                 
+                 [[ "$HEAD" =~ ^fix/.* ]] || \
                  [[ "$HEAD" == "main" ]]; then
                 exit 0
               fi
