@@ -1,59 +1,53 @@
-name: Branch Policy Validation
+name: Release Source Check
 
 on:
   pull_request:
     types: [opened, synchronize, reopened, edited]
+    branches:
+      - prod
+      - uat
 
 jobs:
   validate-source-branch:
+    name: validate-source-branch
     runs-on: ubuntu-latest
 
     steps:
-      - name: Validate branch promotion rules
+      - name: Validate PR source branch
         run: |
           BASE="${{ github.event.pull_request.base.ref }}"
           HEAD="${{ github.event.pull_request.head.ref }}"
 
-          echo "Source: $HEAD"
-          echo "Target: $BASE"
+          echo "============================================="
+          echo "PR Branch Promotion Policy Check"
+          echo "============================================="
+          echo "Source Branch (HEAD): $HEAD"
+          echo "Target Branch (BASE): $BASE"
+          echo "============================================="
 
           case "$BASE" in
 
-            main)
-              if [[ "$HEAD" =~ ^feature/.* ]] || \
-                 [[ "$HEAD" =~ ^bugfix/.* ]] || \
-                 [[ "$HEAD" =~ ^hotfix/.* ]] || \
-                 [[ "$HEAD" =~ ^fix/.* ]] || \
-                 [[ "$HEAD" =~ ^release/.* ]]; then
+            prod)
+              # Target prod: Only allows PRs from uat or hotfix/*
+              if [[ "$HEAD" == "uat" ]] || [[ "$HEAD" =~ ^hotfix/.* ]]; then
+                echo " Allowed: Merge into 'prod' is from '$HEAD'."
                 exit 0
               fi
               ;;
 
-            uat-master)
-              if [[ "$HEAD" == "main" ]] || \
-                 [[ "$HEAD" =~ ^release/.* ]]; then
+            uat)
+              # Target uat: Only allows PRs from dev or hotfix/*
+              if [[ "$HEAD" == "dev" ]] || [[ "$HEAD" =~ ^hotfix/.* ]]; then
+                echo " Allowed: Merge into 'uat' is from '$HEAD'."
                 exit 0
               fi
               ;;
 
-            prod-master)
-              if [[ "$HEAD" == "main" ]] || \
-                 [[ "$HEAD" =~ ^release/.* ]]; then
-                exit 0
-              fi
-              ;;
-
-            dev-master)
-              if [[ "$HEAD" =~ ^feature/.* ]] || \
-                 [[ "$HEAD" =~ ^bugfix/.* ]] || \
-                 [[ "$HEAD" =~ ^hotfix/.* ]] || \
-                 [[ "$HEAD" =~ ^release/.* ]] || \
-                 [[ "$HEAD" =~ ^fix/.* ]] || \
-                 [[ "$HEAD" == "main" ]]; then
-                exit 0
-              fi
-              ;;
           esac
 
-          echo "❌ Branch $HEAD is not allowed to merge into $BASE"
+          echo " Branch '$HEAD' is NOT allowed to merge into '$BASE'."
+          echo ""
+          echo "Policy Rules:"
+          echo "  - Target 'prod': Only allowed from 'uat' or 'hotfix/*'"
+          echo "  - Target 'uat' : Only allowed from 'dev' or 'hotfix/*'"
           exit 1
