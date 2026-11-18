@@ -7,47 +7,141 @@ on:
       - prod
       - uat
 
+permissions:
+  contents: read
+
 jobs:
   validate-source-branch:
     name: validate-source-branch
     runs-on: ubuntu-latest
 
     steps:
-      - name: Validate PR source branch
+      # The ancestry checks below compare the pull request head against the tips
+      # of prod and dev, so the job needs the repository and its full history.
+      # ref is the HEAD SHA, not the default merge commit: we are judging the
+      # branch somebody wrote, not the merge GitHub previews.
+      - name: Check out the pull request head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Fetch the promotion branches
         run: |
-          BASE="${{ github.event.pull_request.base.ref }}"
-          HEAD="${{ github.event.pull_request.head.ref }}"
+          set -euo pipefail
+          git fetch --no-tags --prune origin \
+            "+refs/heads/prod:refs/remotes/origin/prod" \
+            "+refs/heads/uat:refs/remotes/origin/uat" \
+            "+refs/heads/dev:refs/remotes/origin/dev"
+
+      - name: Validate PR source branch
+        # Branch names reach the script through the ENVIRONMENT, never through
+        # ${{ }} interpolation into the script body. GitHub expands ${{ }} by
+        # pasting text into the script before bash parses it, and git's ref
+        # rules allow " $ ` ; & | ( ), so an interpolated branch name is
+        # executable code. As an env value it is only ever data.
+        env:
+          BASE: ${{ github.event.pull_request.base.ref }}
+          HEAD: ${{ github.event.pull_request.head.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
 
           echo "============================================="
           echo "PR Branch Promotion Policy Check"
           echo "============================================="
           echo "Source Branch (HEAD): $HEAD"
           echo "Target Branch (BASE): $BASE"
+          echo "Head SHA            : $HEAD_SHA"
           echo "============================================="
 
+          # The one branch that may be merged into this base without being a
+          # hotfix, and the branch a hotfix into this base must not smuggle in.
           case "$BASE" in
-
             prod)
-              # Target prod: Only allows PRs from uat or hotfix/*
-              if [[ "$HEAD" == "uat" ]] || [[ "$HEAD" =~ ^hotfix/.* ]]; then
-                echo " Allowed: Merge into 'prod' is from '$HEAD'."
-                exit 0
-              fi
+              ALLOWED_SOURCE="uat"
+              FORBIDDEN_CONTENT="origin/dev"
               ;;
-
             uat)
-              # Target uat: Only allows PRs from dev or hotfix/*
-              if [[ "$HEAD" == "dev" ]] || [[ "$HEAD" =~ ^hotfix/.* ]]; then
-                echo " Allowed: Merge into 'uat' is from '$HEAD'."
-                exit 0
-              fi
+              ALLOWED_SOURCE="dev"
+              # dev IS the allowed source for uat, so there is nothing below it
+              # to exclude.
+              FORBIDDEN_CONTENT=""
               ;;
-
+            *)
+              echo "This workflow only guards 'prod' and 'uat'. Base '$BASE' is not one of them." >&2
+              exit 1
+              ;;
           esac
 
-          echo " Branch '$HEAD' is NOT allowed to merge into '$BASE'."
-          echo ""
-          echo "Policy Rules:"
-          echo "  - Target 'prod': Only allowed from 'uat' or 'hotfix/*'"
-          echo "  - Target 'uat' : Only allowed from 'dev' or 'hotfix/*'"
-          exit 1
+          # ---------------------------------------------------------------
+          # The straight promotion: uat -> prod, dev -> uat.
+          # ---------------------------------------------------------------
+          if [ "$HEAD" = "$ALLOWED_SOURCE" ]; then
+            echo "Allowed: '$HEAD' is the promotion source for '$BASE'."
+            exit 0
+          fi
+
+          # ---------------------------------------------------------------
+          # Anything else must be a hotfix, and a hotfix must prove two things.
+          # ---------------------------------------------------------------
+          case "$HEAD" in
+            hotfix/*) ;;
+            *)
+              echo "Branch '$HEAD' is NOT allowed to merge into '$BASE'." >&2
+              echo "" >&2
+              echo "Policy Rules:" >&2
+              echo "  - Target 'prod': only 'uat', or a 'hotfix/*' branch cut from prod" >&2
+              echo "  - Target 'uat' : only 'dev', or a 'hotfix/*' branch cut from uat" >&2
+              exit 1
+              ;;
+          esac
+
+          BASE_REF="origin/$BASE"
+
+          # 1 - The hotfix must CONTAIN the current base tip. A branch that does
+          #     not is missing whatever is already released, and merging it is a
+          #     silent revert of those commits.
+          if ! git merge-base --is-ancestor "$BASE_REF" "$HEAD_SHA"; then
+            echo "Hotfix '$HEAD' does NOT contain the current tip of '$BASE'." >&2
+            echo "" >&2
+            echo "  $BASE tip : $(git rev-parse --short "$BASE_REF")" >&2
+            echo "  hotfix    : $(git rev-parse --short "$HEAD_SHA")" >&2
+            echo "" >&2
+            echo "Rebase the hotfix onto '$BASE', or merge '$BASE' into it, and push again." >&2
+            exit 1
+          fi
+          echo "OK: hotfix contains the current tip of '$BASE'."
+
+          # 2 - The hotfix must NOT carry commits from the branch below the
+          #     allowed source. A 'hotfix/*' cut from dev passes rule 1 the
+          #     moment somebody merges prod into it, and would then drag every
+          #     unreleased dev commit into production while reading, in the pull
+          #     request, as a one-line fix.
+          #
+          #     The second condition matters: once dev's tip has been promoted,
+          #     the base legitimately contains it, and every branch cut from the
+          #     base contains it too. That is not smuggling, so it must not fail.
+          if [ -n "$FORBIDDEN_CONTENT" ]; then
+            if git rev-parse --verify --quiet "$FORBIDDEN_CONTENT" >/dev/null; then
+              if git merge-base --is-ancestor "$FORBIDDEN_CONTENT" "$HEAD_SHA" \
+                 && ! git merge-base --is-ancestor "$FORBIDDEN_CONTENT" "$BASE_REF"; then
+                echo "Hotfix '$HEAD' contains the tip of '$FORBIDDEN_CONTENT', which '$BASE' does not have." >&2
+                echo "" >&2
+                echo "This branch carries unreleased work from '$FORBIDDEN_CONTENT'. A hotfix is cut" >&2
+                echo "from '$BASE' and carries only its own fix; promote the rest through" >&2
+                echo "'$ALLOWED_SOURCE' in the normal order." >&2
+                echo "" >&2
+                echo "Commits on this branch that '$BASE' does not have:" >&2
+                git log --oneline --no-decorate "$BASE_REF..$HEAD_SHA" >&2
+                exit 1
+              fi
+            else
+              echo "NOTICE: '$FORBIDDEN_CONTENT' could not be resolved; skipping the content check."
+            fi
+          fi
+
+          AHEAD="$(git rev-list --count "$BASE_REF..$HEAD_SHA")"
+          echo "OK: hotfix adds $AHEAD commit(s) on top of '$BASE'."
+          git log --oneline --no-decorate "$BASE_REF..$HEAD_SHA"
+          echo "Allowed: hotfix '$HEAD' may merge into '$BASE'."
